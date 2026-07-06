@@ -1,6 +1,6 @@
 """
 Telegram-бот "Мої страви" — меню з розділами та підкатегоріями.
-
+ 
 ЯК ДОДАВАТИ РЕЦЕПТИ:
 Знайди словник RECIPES нижче. Кожен рецепт — це один запис у списку.
 Приклад:
@@ -9,7 +9,7 @@ Telegram-бот "Мої страви" — меню з розділами та п
         "text": "Інгредієнти: хліб, авокадо, сіль...\n\nПриготування: ...",
         "photo": None,  # або "https://посилання-на-фото.jpg", або "AgAC..." (file_id)
     }
-
+ 
 ВАЖЛИВІ ПРАВИЛА, щоб не було помилок:
 1. Посилання на фото ЗАВЖДИ бери в лапки: "photo": "https://...",
    (якщо фото немає — пиши "photo": None, без лапок)
@@ -18,7 +18,7 @@ Telegram-бот "Мої страви" — меню з розділами та п
 3. Кожен рецепт-блок { ... } має закінчуватись комою, перед наступним { ... }
 4. Кожен рядок "text": "..." має починатись і закінчуватись лапками
 """
-
+ 
 import logging
 import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -30,10 +30,10 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
+ 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+ 
 # ==============================
 # 1. СТРУКТУРА РОЗДІЛІВ
 # ==============================
@@ -44,7 +44,7 @@ SECTIONS = {
     "🍽 Вечеря": ["Каші", "З мʼясом", "З рибою", "З картоплею", "Салати"],
     "🎉 Святкові страви": ["Салати", "Гарячі страви", "Закуски", "Напої", "Солодке"],
 }
-
+ 
 # ==============================
 # 2. РЕЦЕПТИ — ДОДАВАЙ СЮДИ СВОЇ СТРАВИ
 # ==============================
@@ -112,66 +112,84 @@ RECIPES = {
         "Солодке": [],
     },
 }
-
+ 
 # ==============================
 # 3. ЛОГІКА БОТА (нічого міняти не треба нижче)
 # ==============================
-
+ 
+async def send_menu(query, text, keyboard):
+    """Завжди видаляє поточне повідомлення і надсилає нове текстове меню.
+    Це потрібно, бо повідомлення з фото не можна перетворити на текстове
+    через edit_message_text — тому найнадійніше видалити і надіслати заново."""
+    chat_id = query.message.chat_id
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await query.get_bot().send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+ 
+ 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(section, callback_data=f"section|{section}")] for section in SECTIONS]
     await update.message.reply_text(
         "Привіт! Обери розділ:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
-
+ 
+ 
 async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Допоміжна команда: надішли боту фото, він поверне file_id для вставки у RECIPES."""
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         await update.message.reply_text(f"file_id цього фото:\n\n{file_id}")
-
-
+ 
+ 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
+ 
     if data.startswith("section|"):
         section = data.split("|", 1)[1]
         subcats = SECTIONS[section]
         keyboard = [[InlineKeyboardButton(s, callback_data=f"subcat|{section}|{s}")] for s in subcats]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_sections")])
-        await query.edit_message_text(f"{section}\nОбери категорію:", reply_markup=InlineKeyboardMarkup(keyboard))
-
+        await send_menu(query, f"{section}\nОбери категорію:", keyboard)
+ 
     elif data.startswith("subcat|"):
         _, section, subcat = data.split("|", 2)
         recipes = RECIPES.get(section, {}).get(subcat, [])
         if not recipes:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"section|{section}")]]
-            await query.edit_message_text(
-                f"У категорії «{subcat}» поки що немає рецептів.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+            await send_menu(query, f"У категорії «{subcat}» поки що немає рецептів.", keyboard)
             return
         keyboard = [
             [InlineKeyboardButton(r["title"], callback_data=f"recipe|{section}|{subcat}|{i}")]
             for i, r in enumerate(recipes)
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"section|{section}")])
-        await query.edit_message_text(f"{subcat}\nОбери страву:", reply_markup=InlineKeyboardMarkup(keyboard))
-
+        await send_menu(query, f"{subcat}\nОбери страву:", keyboard)
+ 
     elif data.startswith("recipe|"):
         _, section, subcat, idx = data.split("|", 3)
         recipe = RECIPES[section][subcat][int(idx)]
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"subcat|{section}|{subcat}")]]
         markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.delete()
+ 
+        chat_id = query.message.chat_id
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+ 
         caption = f"*{recipe['title']}*\n\n{recipe['text']}"
         if recipe.get("photo"):
             await context.bot.send_photo(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 photo=recipe["photo"],
                 caption=caption,
                 parse_mode="Markdown",
@@ -179,30 +197,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 text=caption,
                 parse_mode="Markdown",
                 reply_markup=markup,
             )
-
+ 
     elif data == "back_to_sections":
         keyboard = [[InlineKeyboardButton(section, callback_data=f"section|{section}")] for section in SECTIONS]
-        await query.edit_message_text("Обери розділ:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
+        await send_menu(query, "Обери розділ:", keyboard)
+ 
+ 
 def main():
     token = os.environ.get("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не знайдено BOT_TOKEN. Додай його як змінну середовища.")
-
+ 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, get_photo_id))
     app.add_handler(CallbackQueryHandler(button_handler))
-
+ 
     logger.info("Бот запущено.")
     app.run_polling()
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
+ 
