@@ -1,5 +1,6 @@
 """
-Telegram-бот "Мої страви" — меню з розділами та підкатегоріями.
+Telegram-бот "Мої страви" — меню з розділами та підкатегоріями,
+а також функція випадкового вибору страви з обраного розділу.
 
 ЯК ДОДАВАТИ РЕЦЕПТИ:
 Знайди словник RECIPES нижче. Кожен рецепт — це один запис у списку.
@@ -24,6 +25,7 @@ Telegram-бот "Мої страви" — меню з розділами та п
 
 import logging
 import os
+import random
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -530,6 +532,15 @@ RECIPES = {
 # 3. ЛОГІКА БОТА (нічого міняти не треба нижче)
 # ==============================
 
+def all_recipes_in_section(section):
+    """Повертає список усіх рецептів з усіх підкатегорій обраного розділу."""
+    recipes = []
+    for subcat, items in RECIPES.get(section, {}).items():
+        for r in items:
+            recipes.append((subcat, r))
+    return recipes
+
+
 async def send_menu(query, text, keyboard):
     """Завжди видаляє поточне повідомлення і надсилає нове текстове меню.
     Це потрібно, бо повідомлення з фото не можна перетворити на текстове
@@ -546,11 +557,16 @@ async def send_menu(query, text, keyboard):
     )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def main_menu_keyboard():
     keyboard = [[InlineKeyboardButton(section, callback_data=f"section|{section}")] for section in SECTIONS]
+    keyboard.append([InlineKeyboardButton("🎲 Випадкова страва", callback_data="random_menu")])
+    return keyboard
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привіт! Обери розділ:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "Привіт! Обери розділ, або натисни «🎲 Випадкова страва», щоб отримати випадкову ідею:",
+        reply_markup=InlineKeyboardMarkup(main_menu_keyboard()),
     )
 
 
@@ -559,6 +575,35 @@ async def get_photo_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         await update.message.reply_text(f"file_id цього фото:\n\n{file_id}")
+
+
+async def send_recipe(query, section, subcat, recipe, back_callback):
+    """Показує рецепт (з фото чи без) і кнопку Назад."""
+    keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=back_callback)]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    chat_id = query.message.chat_id
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    caption = f"*{recipe['title']}*\n\n{recipe['text']}"
+    if recipe.get("photo"):
+        await query.get_bot().send_photo(
+            chat_id=chat_id,
+            photo=recipe["photo"],
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+    else:
+        await query.get_bot().send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -590,7 +635,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("recipe|"):
         _, section, subcat, idx = data.split("|", 3)
         recipe = RECIPES[section][subcat][int(idx)]
-        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"subcat|{section}|{subcat}")]]
+        await send_recipe(query, section, subcat, recipe, back_callback=f"subcat|{section}|{subcat}")
+
+    elif data == "back_to_sections":
+        await send_menu(query, "Обери розділ:", main_menu_keyboard())
+
+    # ===== ВИПАДКОВИЙ ВИБІР СТРАВИ =====
+    elif data == "random_menu":
+        keyboard = [[InlineKeyboardButton(section, callback_data=f"random_section|{section}")] for section in SECTIONS]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_sections")])
+        await send_menu(query, "🎲 Обери розділ, з якого хочеш випадкову страву:", keyboard)
+
+    elif data.startswith("random_section|"):
+        section = data.split("|", 1)[1]
+        pool = all_recipes_in_section(section)
+        if not pool:
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="random_menu")]]
+            await send_menu(query, f"У розділі «{section}» поки що немає жодного рецепта.", keyboard)
+            return
+
+        subcat, recipe = random.choice(pool)
+
+        keyboard = [
+            [InlineKeyboardButton("🎲 Ще раз", callback_data=f"random_section|{section}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="random_menu")],
+        ]
         markup = InlineKeyboardMarkup(keyboard)
 
         chat_id = query.message.chat_id
@@ -599,9 +668,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        caption = f"*{recipe['title']}*\n\n{recipe['text']}"
+        caption = f"🎲 *{recipe['title']}*\n_{section} → {subcat}_\n\n{recipe['text']}"
         if recipe.get("photo"):
-            await context.bot.send_photo(
+            await query.get_bot().send_photo(
                 chat_id=chat_id,
                 photo=recipe["photo"],
                 caption=caption,
@@ -609,16 +678,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=markup,
             )
         else:
-            await context.bot.send_message(
+            await query.get_bot().send_message(
                 chat_id=chat_id,
                 text=caption,
                 parse_mode="Markdown",
                 reply_markup=markup,
             )
-
-    elif data == "back_to_sections":
-        keyboard = [[InlineKeyboardButton(section, callback_data=f"section|{section}")] for section in SECTIONS]
-        await send_menu(query, "Обери розділ:", keyboard)
 
 
 def main():
